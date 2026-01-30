@@ -1,0 +1,113 @@
+/* Highlight style for selected elements */
+.mdcp-selected-element-outline {
+  outline: 2px solid #4285f4 !important;
+  outline-offset: 2px !important;
+  background-color: rgba(66, 133, 244, 0.1) !important;
+  cursor: pointer !important;
+  position: relative !important;
+}
+
+/* Highlight style for multi-selected elements (with Command key) */
+.mdcp-multi-selected {
+  outline: 3px solid #34a853 !important;
+  outline-offset: 2px !important;
+  background-color: rgba(52, 168, 83, 0.15) !important;
+}
+
+/* Toast notification for copy success */
+.mdcp-toast {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background-color: #323232;
+  color: white;
+  padding: 16px 24px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 2147483647;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  animation: mdcp-slideIn 0.3s ease-out, mdcp-slideOut 0.3s ease-in 2.7s;
+  pointer-events: none;
+}
+
+@keyframes mdcp-slideIn {
+  from {
+    transform: translateX(400px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes mdcp-slideOut {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(400px);
+    opacity: 0;
+  }
+}
+
+/* Overlay to indicate selection mode is active */
+.mdcp-selection-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.02);
+  z-index: 2147483646;
+  pointer-events: none;
+}
+
+/* Floating button */
+.mdcp-floating-button {
+  position: fixed;
+  bottom: 30px;
+  right: 30px;
+  width: 40px;
+  height: 40px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: move;
+  z-index: 2147483647;
+  font-size: 18px;
+  user-select: none;
+  opacity: 0.25;
+  transition: opacity 0.3s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.mdcp-floating-button:hover {
+  opacity: 1;
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5);
+}
+
+.mdcp-floating-button:active {
+  transform: scale(0.95);
+}
+
+.mdcp-floating-button.mdcp-active {
+  opacity: 0.9;
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+.mdcp-floating-button.mdcp-active:hover {
+  opacity: 1;
+}
+
+.mdcp-floating-button.mdcp-dragging {
+  cursor: grabbing;
+  opacity: 0.8;
+  box-shadow: 0 6px 16px rgba(102, 126, 234, 0.6);
+  transform: scale(1.02);
+}

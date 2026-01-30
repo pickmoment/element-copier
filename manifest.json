@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Element Copier",
+  "version": "1.0.0",
+  "description": "웹페이지의 HTML 요소를 선택하여 Markdown/Image으로 변환하고 클립보드에 복사합니다.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "clipboardWrite",
+    "storage"
+  ],
+  "action": {
+    "default_title": "Element Copier"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["lib/turndown.js", "lib/turndown-plugin-gfm.js", "lib/html2canvas.min.js", "content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_end"
+    }
+  ]
+}
