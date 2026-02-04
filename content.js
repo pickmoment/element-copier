@@ -23,6 +23,14 @@
     let wasDragged = false;
     let copyAsImage = false; // Flag to determine if copying as image
 
+    // Area selection mode
+    let isAreaSelectionMode = false;
+    let isDrawingArea = false;
+    let areaStartPos = { x: 0, y: 0 };
+    let areaEndPos = { x: 0, y: 0 };
+    let selectionBox = null;
+    let justFinishedAreaSelection = false;
+
     // Initialize Turndown converter with GFM plugin for better table support
     const turndownService = new TurndownService({
         headingStyle: 'atx',
@@ -182,10 +190,45 @@
     }
 
     /**
+     * Check if current site is YouTube
+     */
+    function isYouTubeSite() {
+        return window.location.hostname.includes('youtube.com');
+    }
+
+    /**
+     * Extract YouTube video links from element
+     */
+    function extractYouTubeLinks(element) {
+        const links = [];
+        const linkElements = element.tagName === 'A' ? [element] : Array.from(element.querySelectorAll('a'));
+
+        linkElements.forEach(link => {
+            const href = link.href;
+            // Match YouTube video URLs
+            if (href && (href.includes('youtube.com/watch?v=') || href.includes('youtu.be/'))) {
+                links.push(href);
+            }
+        });
+
+        return links;
+    }
+
+    /**
      * Convert HTML element to Markdown
      */
     function convertToMarkdown(element) {
         try {
+            // If on YouTube, extract only video links
+            if (isYouTubeSite()) {
+                const links = extractYouTubeLinks(element);
+                if (links.length > 0) {
+                    return links.join('\n');
+                } else {
+                    return '영상 링크가 없습니다.';
+                }
+            }
+
             // Clone the element to avoid modifying the original
             const clonedElement = element.cloneNode(true);
 
@@ -211,8 +254,11 @@
     function handleMouseOver(event) {
         if (!isSelectionMode) return;
 
+        // Don't highlight elements in area selection mode
+        if (isAreaSelectionMode) return;
+
         // Ignore hover on floating button and overlay
-        if (event.target === floatingButton || floatingButton.contains(event.target) || 
+        if (event.target === floatingButton || floatingButton.contains(event.target) ||
             event.target === overlay) {
             return;
         }
@@ -229,7 +275,7 @@
         // Highlight current element
         currentElement = event.target;
         currentElement.classList.add('mdcp-selected-element-outline');
-        
+
         // Temporarily hide floating button when hovering over elements
         if (floatingButton && !floatingButton.classList.contains('mdcp-dragging')) {
             floatingButton.style.opacity = '0.1';
@@ -242,13 +288,276 @@
     function handleMouseOut(event) {
         if (!isSelectionMode) return;
 
+        // Don't handle in area selection mode
+        if (isAreaSelectionMode) return;
+
         event.preventDefault();
         event.stopPropagation();
-        
+
         // Restore floating button opacity when not hovering
         if (floatingButton && event.target === currentElement) {
             floatingButton.style.opacity = '';
         }
+    }
+
+    /**
+     * Handle mouse down for area selection
+     */
+    function handleMouseDown(event) {
+        if (!isSelectionMode) return;
+
+        // Only start area selection if Alt/Option key is pressed
+        if (!event.altKey) return;
+
+        // Ignore if clicking on floating button
+        if (event.target === floatingButton || floatingButton.contains(event.target)) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        isDrawingArea = true;
+        areaStartPos = { x: event.clientX, y: event.clientY };
+        areaEndPos = { x: event.clientX, y: event.clientY };
+
+        // Create selection box
+        createSelectionBox();
+    }
+
+    /**
+     * Handle mouse move for area selection
+     */
+    function handleMouseMoveArea(event) {
+        if (!isSelectionMode || !isDrawingArea) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        areaEndPos = { x: event.clientX, y: event.clientY };
+        updateSelectionBox();
+    }
+
+    /**
+     * Handle mouse up for area selection
+     */
+    function handleMouseUp(event) {
+        if (!isSelectionMode || !isDrawingArea) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        isDrawingArea = false;
+        justFinishedAreaSelection = true;
+
+        // Reset flag after a short delay to prevent immediate click
+        setTimeout(() => {
+            justFinishedAreaSelection = false;
+        }, 100);
+
+        // Find all elements within the selection box
+        const selectedInArea = getElementsInArea(areaStartPos, areaEndPos);
+
+        // Add to selected elements
+        selectedInArea.forEach(el => {
+            if (!selectedElements.includes(el)) {
+                selectedElements.push(el);
+                el.classList.add('mdcp-multi-selected');
+            }
+        });
+
+        // Remove selection box
+        removeSelectionBox();
+
+        if (selectedInArea.length > 0) {
+            showToast(`${selectedElements.length}개 요소 선택됨 (엔터키로 복사)`);
+        } else {
+            showToast('영역 내에 요소가 없습니다.');
+        }
+    }
+
+    /**
+     * Create selection box element
+     */
+    function createSelectionBox() {
+        if (selectionBox) {
+            removeSelectionBox();
+        }
+
+        selectionBox = document.createElement('div');
+        selectionBox.className = 'mdcp-selection-box';
+        document.body.appendChild(selectionBox);
+        updateSelectionBox();
+    }
+
+    /**
+     * Update selection box position and size
+     */
+    function updateSelectionBox() {
+        if (!selectionBox) return;
+
+        const left = Math.min(areaStartPos.x, areaEndPos.x);
+        const top = Math.min(areaStartPos.y, areaEndPos.y);
+        const width = Math.abs(areaEndPos.x - areaStartPos.x);
+        const height = Math.abs(areaEndPos.y - areaStartPos.y);
+
+        selectionBox.style.left = left + 'px';
+        selectionBox.style.top = top + 'px';
+        selectionBox.style.width = width + 'px';
+        selectionBox.style.height = height + 'px';
+    }
+
+    /**
+     * Remove selection box
+     */
+    function removeSelectionBox() {
+        if (selectionBox) {
+            selectionBox.remove();
+            selectionBox = null;
+        }
+    }
+
+    /**
+     * Get all elements within the selection area
+     */
+    function getElementsInArea(start, end) {
+        const left = Math.min(start.x, end.x);
+        const top = Math.min(start.y, end.y);
+        const right = Math.max(start.x, end.x);
+        const bottom = Math.max(start.y, end.y);
+
+        const selectionWidth = right - left;
+        const selectionHeight = bottom - top;
+
+        const elements = [];
+        const allElements = document.querySelectorAll('body *');
+
+        allElements.forEach(el => {
+            // Skip our own elements
+            if (el === floatingButton || floatingButton.contains(el) ||
+                el === overlay || el === selectionBox ||
+                el.classList.contains('mdcp-toast')) {
+                return;
+            }
+
+            const rect = el.getBoundingClientRect();
+
+            // Skip elements that are too large (likely container elements)
+            // Only select if element is not significantly larger than selection area
+            const elementArea = rect.width * rect.height;
+            const selectionArea = selectionWidth * selectionHeight;
+
+            // Skip if element is more than 3x the selection area
+            if (elementArea > selectionArea * 3) {
+                return;
+            }
+
+            // Check if element's center point is within selection area
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+
+            if (centerX >= left && centerX <= right &&
+                centerY >= top && centerY <= bottom) {
+                elements.push(el);
+            }
+        });
+
+        // If a parent's ALL direct children are selected, keep only the parent and remove children
+        const optimizedElements = [...elements];
+
+        elements.forEach(parent => {
+            // Get all descendants of this parent that are in the selection
+            const descendants = elements.filter(el =>
+                el !== parent && parent.contains(el)
+            );
+
+            if (descendants.length > 0) {
+                // Get all actual direct children of parent element
+                const allDirectChildren = Array.from(parent.children);
+
+                // Check if all visible direct children are in the selection
+                const visibleChildren = allDirectChildren.filter(child => {
+                    const rect = child.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                });
+
+                const selectedVisibleChildren = visibleChildren.filter(child =>
+                    elements.includes(child)
+                );
+
+                // If all visible direct children are selected, remove them and keep only parent
+                if (visibleChildren.length > 0 &&
+                    selectedVisibleChildren.length === visibleChildren.length) {
+                    // Remove all descendants from the list
+                    descendants.forEach(child => {
+                        const index = optimizedElements.indexOf(child);
+                        if (index > -1) {
+                            optimizedElements.splice(index, 1);
+                        }
+                    });
+                }
+            }
+        });
+
+        return optimizedElements;
+    }
+
+    /**
+     * Process and copy selected elements
+     */
+    function processAndCopy() {
+        const elementsToProcess = selectedElements.length > 0 ? selectedElements : (currentElement ? [currentElement] : []);
+
+        if (elementsToProcess.length === 0) {
+            showToast('✗ 선택된 요소가 없습니다.');
+            return;
+        }
+
+        if (copyAsImage) {
+            // Copy as image
+            if (elementsToProcess.length === 1) {
+                copyImageToClipboard(elementsToProcess[0]);
+            } else {
+                // For multiple elements, create a wrapper and capture it
+                copyMultipleElementsAsImage(elementsToProcess);
+            }
+        } else {
+            // Convert to Markdown
+            const markdowns = elementsToProcess.map(el => convertToMarkdown(el)).filter(md => md);
+
+            if (markdowns.length > 0) {
+                let combinedMarkdown;
+
+                // For YouTube, deduplicate links
+                if (isYouTubeSite()) {
+                    // Split all links and deduplicate
+                    const allLinks = markdowns.flatMap(md => md.split('\n').filter(line => line.trim()));
+                    // Filter out non-link text like "영상 링크가 없습니다."
+                    const videoLinks = allLinks.filter(link =>
+                        link.includes('youtube.com/watch?v=') || link.includes('youtu.be/')
+                    );
+                    const uniqueLinks = [...new Set(videoLinks)];
+
+                    if (uniqueLinks.length > 0) {
+                        combinedMarkdown = uniqueLinks.join('\n');
+                    } else {
+                        showToast('✗ 영상 링크가 없습니다.');
+                        deactivateSelectionMode();
+                        return;
+                    }
+                } else {
+                    combinedMarkdown = markdowns.join('\n\n');
+                }
+
+                // Copy to clipboard
+                copyToClipboard(combinedMarkdown);
+            } else {
+                showToast('✗ Markdown 변환에 실패했습니다.');
+            }
+        }
+
+        // Clean up
+        deactivateSelectionMode();
     }
 
     /**
@@ -262,61 +571,35 @@
             return;
         }
 
+        // Ignore click immediately after area selection
+        if (justFinishedAreaSelection) {
+            return;
+        }
+
         // Prevent default behavior and stop propagation
         event.preventDefault();
         event.stopPropagation();
 
         if (currentElement) {
-            // Check if Command key (Meta key on Mac) or Ctrl key (on Windows/Linux) is pressed
-            if (event.metaKey || event.ctrlKey) {
-                // Multi-select mode
-                const index = selectedElements.indexOf(currentElement);
-                if (index > -1) {
-                    // Element is already selected, remove it
-                    selectedElements.splice(index, 1);
-                    currentElement.classList.remove('mdcp-selected-element-outline');
-                    currentElement.classList.remove('mdcp-multi-selected');
-                    showToast(`선택 해제됨 (${selectedElements.length}개 선택됨)`);
-                } else {
-                    // Add to selection
-                    selectedElements.push(currentElement);
-                    currentElement.classList.add('mdcp-multi-selected');
-                    showToast(`${selectedElements.length}개 요소 선택됨 (Command 없이 클릭하여 복사)`);
-                }
-                return;
-            }
-
-            // Normal click without Command key
-            const elementsToProcess = selectedElements.length > 0 ? selectedElements : [currentElement];
-            
-            if (copyAsImage) {
-                // Copy as image
-                if (elementsToProcess.length === 1) {
-                    copyImageToClipboard(elementsToProcess[0]);
-                } else {
-                    // For multiple elements, create a wrapper and capture it
-                    copyMultipleElementsAsImage(elementsToProcess);
-                }
+            // Toggle selection: if already selected, remove it; otherwise add it
+            const index = selectedElements.indexOf(currentElement);
+            if (index > -1) {
+                // Element is already selected, remove it
+                selectedElements.splice(index, 1);
+                currentElement.classList.remove('mdcp-selected-element-outline');
+                currentElement.classList.remove('mdcp-multi-selected');
+                showToast(`선택 해제됨 (${selectedElements.length}개 선택됨)`);
             } else {
-                // Convert to Markdown
-                const markdowns = elementsToProcess.map(el => convertToMarkdown(el)).filter(md => md);
-
-                if (markdowns.length > 0) {
-                    const combinedMarkdown = markdowns.join('\n\n');
-                    // Copy to clipboard
-                    copyToClipboard(combinedMarkdown);
-                } else {
-                    showToast('✗ Markdown 변환에 실패했습니다.');
-                }
+                // Add to selection
+                selectedElements.push(currentElement);
+                currentElement.classList.add('mdcp-multi-selected');
+                showToast(`${selectedElements.length}개 요소 선택됨 (엔터키로 복사)`);
             }
-
-            // Clean up
-            deactivateSelectionMode();
         }
     }
 
     /**
-     * Handle keydown event (ESC to cancel, Shift to hide button)
+     * Handle keydown event (ESC to cancel, Shift to hide button, Alt for area selection, Enter to copy)
      */
     function handleKeyDown(event) {
         if (!isSelectionMode) return;
@@ -324,18 +607,38 @@
         if (event.key === 'Escape') {
             event.preventDefault();
             event.stopPropagation();
-            showToast('선택 모드가 취소되었습니다.');
-            deactivateSelectionMode();
+
+            // Cancel area selection if in progress
+            if (isDrawingArea) {
+                isDrawingArea = false;
+                removeSelectionBox();
+                showToast('영역 선택이 취소되었습니다.');
+            } else {
+                showToast('선택 모드가 취소되었습니다.');
+                deactivateSelectionMode();
+            }
+        } else if (event.key === 'Enter') {
+            // Copy selected elements
+            event.preventDefault();
+            event.stopPropagation();
+            processAndCopy();
         } else if (event.key === 'Shift') {
             // Temporarily hide floating button when Shift is pressed
             if (floatingButton) {
                 floatingButton.style.display = 'none';
             }
+        } else if (event.key === 'Alt') {
+            // Enable area selection mode
+            if (!isAreaSelectionMode) {
+                isAreaSelectionMode = true;
+                document.body.style.cursor = 'crosshair';
+                showToast('영역 선택 모드 (드래그하여 영역 선택)');
+            }
         }
     }
 
     /**
-     * Handle keyup event (restore button visibility)
+     * Handle keyup event (restore button visibility, disable area selection)
      */
     function handleKeyUp(event) {
         if (!isSelectionMode) return;
@@ -344,6 +647,13 @@
             // Restore floating button when Shift is released
             if (floatingButton) {
                 floatingButton.style.display = '';
+            }
+        } else if (event.key === 'Alt') {
+            // Disable area selection mode
+            if (isAreaSelectionMode && !isDrawingArea) {
+                isAreaSelectionMode = false;
+                document.body.style.cursor = '';
+                showToast('영역 선택 모드 종료');
             }
         }
     }
@@ -525,11 +835,14 @@
         document.addEventListener('mouseover', handleMouseOver, true);
         document.addEventListener('mouseout', handleMouseOut, true);
         document.addEventListener('click', handleClick, true);
+        document.addEventListener('mousedown', handleMouseDown, true);
+        document.addEventListener('mousemove', handleMouseMoveArea, true);
+        document.addEventListener('mouseup', handleMouseUp, true);
         document.addEventListener('keydown', handleKeyDown, true);
         document.addEventListener('keyup', handleKeyUp, true);
 
         const modeText = copyAsImage ? '이미지' : 'Markdown';
-        showToast(`요소를 클릭하여 ${modeText}로 복사하세요 (Cmd+클릭: 다중 선택, Shift: 버튼 숨기기, ESC: 취소)`);
+        showToast(`요소를 클릭하여 선택하세요 (Alt+드래그: 영역 선택, Enter: 복사, ESC: 취소)`);
     }
 
     /**
@@ -541,6 +854,9 @@
         isSelectionMode = false;
         window.mdcpSelectionActive = false;
         copyAsImage = false; // Reset flag
+        isAreaSelectionMode = false;
+        isDrawingArea = false;
+        justFinishedAreaSelection = false;
 
         // Remove highlight from current element
         if (currentElement) {
@@ -561,6 +877,12 @@
             overlay = null;
         }
 
+        // Remove selection box
+        removeSelectionBox();
+
+        // Reset cursor
+        document.body.style.cursor = '';
+
         // Reset button appearance
         if (floatingButton) {
             floatingButton.classList.remove('mdcp-active');
@@ -574,6 +896,9 @@
         document.removeEventListener('mouseover', handleMouseOver, true);
         document.removeEventListener('mouseout', handleMouseOut, true);
         document.removeEventListener('click', handleClick, true);
+        document.removeEventListener('mousedown', handleMouseDown, true);
+        document.removeEventListener('mousemove', handleMouseMoveArea, true);
+        document.removeEventListener('mouseup', handleMouseUp, true);
         document.removeEventListener('keydown', handleKeyDown, true);
         document.removeEventListener('keyup', handleKeyUp, true);
     }
