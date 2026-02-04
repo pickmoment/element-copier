@@ -92,10 +92,10 @@
     async function copyMultipleElementsAsImage(elements) {
         try {
             showToast('이미지 생성 중...');
-            
+
             // Find the bounding box that contains all selected elements
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            
+
             elements.forEach(el => {
                 const rect = el.getBoundingClientRect();
                 minX = Math.min(minX, rect.left);
@@ -103,10 +103,13 @@
                 maxX = Math.max(maxX, rect.right);
                 maxY = Math.max(maxY, rect.bottom);
             });
-            
+
+            // Calculate position including scroll offset
+            const x = minX + window.scrollX;
+            const y = minY + window.scrollY;
             const width = maxX - minX;
             const height = maxY - minY;
-            
+
             // Capture the area containing all selected elements
             const canvas = await html2canvas(document.body, {
                 backgroundColor: '#ffffff',
@@ -114,26 +117,24 @@
                 useCORS: true,
                 allowTaint: true,
                 scale: 2,
-                scrollX: 0,
-                scrollY: 0,
-                windowWidth: document.documentElement.scrollWidth,
-                windowHeight: document.documentElement.scrollHeight,
-                x: minX + window.pageXOffset,
-                y: minY + window.pageYOffset,
+                x: x,
+                y: y,
                 width: width,
-                height: height
+                height: height,
+                scrollX: -window.scrollX,
+                scrollY: -window.scrollY
             });
-            
+
             // Convert canvas to blob
             const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-            
+
             // Copy to clipboard
             await navigator.clipboard.write([
                 new ClipboardItem({
                     'image/png': blob
                 })
             ]);
-            
+
             showToast('✓ 이미지가 클립보드에 복사되었습니다!');
             return true;
         } catch (error) {
@@ -149,37 +150,41 @@
     async function copyImageToClipboard(element) {
         try {
             showToast('이미지 생성 중...');
-            
+
             // Get element's position and size
             const rect = element.getBoundingClientRect();
-            
-            // Use html2canvas to capture the element as it appears on screen
-            const canvas = await html2canvas(element, {
-                backgroundColor: '#ffffff', // Use white background to match screen appearance
+
+            // Calculate position including scroll offset
+            const x = rect.left + window.scrollX;
+            const y = rect.top + window.scrollY;
+            const width = rect.width;
+            const height = rect.height;
+
+            // Use html2canvas to capture the body and crop to element area
+            const canvas = await html2canvas(document.body, {
+                backgroundColor: '#ffffff',
                 logging: false,
                 useCORS: true,
                 allowTaint: true,
-                scale: 2, // Higher quality
-                scrollX: 0,
-                scrollY: 0,
-                windowWidth: document.documentElement.scrollWidth,
-                windowHeight: document.documentElement.scrollHeight,
-                x: rect.left + window.pageXOffset,
-                y: rect.top + window.pageYOffset,
-                width: rect.width,
-                height: rect.height
+                scale: 2,
+                x: x,
+                y: y,
+                width: width,
+                height: height,
+                scrollX: -window.scrollX,
+                scrollY: -window.scrollY
             });
-            
+
             // Convert canvas to blob
             const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-            
+
             // Copy to clipboard
             await navigator.clipboard.write([
                 new ClipboardItem({
                     'image/png': blob
                 })
             ]);
-            
+
             showToast('✓ 이미지가 클립보드에 복사되었습니다!');
             return true;
         } catch (error) {
