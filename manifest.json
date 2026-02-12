@@ -5,9 +5,13 @@
   "description": "웹페이지의 HTML 요소를 선택하여 Markdown/Image으로 변환하고 클립보드에 복사합니다.",
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "clipboardWrite",
     "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "action": {
     "default_title": "Element Copier"
@@ -18,7 +22,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["lib/turndown.js", "lib/turndown-plugin-gfm.js", "lib/html2canvas.min.js", "content.js"],
+      "js": ["lib/turndown.js", "lib/turndown-plugin-gfm.js", "lib/marked.min.js", "content.js"],
       "css": ["styles.css"],
       "run_at": "document_end"
     }
