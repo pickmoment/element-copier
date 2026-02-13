@@ -439,6 +439,14 @@
         return Array.from(links);
     }
 
+    function extractYouTubeWatchLinks(markdown) {
+        const links = extractLinksFromMarkdown(markdown);
+        const watchLinks = links.filter(link => {
+            return link.includes('youtube.com/watch') || link.includes('youtu.be/');
+        });
+        return Array.from(new Set(watchLinks));
+    }
+
     /**
      * Create or update preview panel
      */
@@ -460,6 +468,7 @@
                     <button class="mdcp-preview-tab active" data-tab="render">렌더링</button>
                     <button class="mdcp-preview-tab" data-tab="edit">수정</button>
                     <button class="mdcp-preview-tab" data-tab="links">링크</button>
+                    <button class="mdcp-preview-tab" data-tab="videos">영상링크</button>
                 </div>
                 <div class="mdcp-preview-body">
                     <div class="mdcp-preview-pane" data-pane="render"></div>
@@ -468,6 +477,9 @@
                     </div>
                     <div class="mdcp-preview-pane mdcp-preview-pane-hidden" data-pane="links">
                         <div class="mdcp-preview-links"></div>
+                    </div>
+                    <div class="mdcp-preview-pane mdcp-preview-pane-hidden" data-pane="videos">
+                        <div class="mdcp-preview-links mdcp-preview-videos"></div>
                     </div>
                 </div>
                 <div class="mdcp-preview-resize-handle tl" data-resize="tl" title="크기 변경"></div>
@@ -578,9 +590,20 @@
                     } else {
                         showToast('추출된 링크가 없습니다.', event);
                     }
-                } else {
-                    await copyToClipboard(previewState.markdown, null, event);
+                    return;
                 }
+
+                if (previewState.activeTab === 'videos') {
+                    const videoLinks = extractYouTubeWatchLinks(previewState.markdown);
+                    if (videoLinks.length > 0) {
+                        await copyToClipboard(videoLinks.join('\n'), '✓ 영상 링크가 클립보드에 복사되었습니다!', event);
+                    } else {
+                        showToast('영상 링크가 없습니다.', event);
+                    }
+                    return;
+                }
+
+                await copyToClipboard(previewState.markdown, null, event);
             });
 
             const tabs = previewPanel.querySelectorAll('.mdcp-preview-tab');
@@ -647,7 +670,8 @@
 
         const renderPane = previewPanel.querySelector('[data-pane="render"]');
         const textarea = previewPanel.querySelector('.mdcp-preview-textarea');
-        const linksContainer = previewPanel.querySelector('.mdcp-preview-links');
+        const linksContainer = previewPanel.querySelector('[data-pane="links"] .mdcp-preview-links');
+        const videosContainer = previewPanel.querySelector('[data-pane="videos"] .mdcp-preview-videos');
 
         if (textarea.value !== previewState.markdown) {
             textarea.value = previewState.markdown;
@@ -655,12 +679,25 @@
         renderPane.innerHTML = markdownToHtml(previewState.markdown);
 
         const links = extractLinksFromMarkdown(previewState.markdown).filter(link => link.trim() !== '');
-        if (links.length === 0) {
-            linksContainer.innerHTML = '<div class="mdcp-preview-empty">링크가 없습니다.</div>';
-        } else {
-            linksContainer.innerHTML = links.map(link => (
-                `<div class="mdcp-preview-link"><a href="${link}" target="_blank" rel="noopener noreferrer">${link}</a></div>`
-            )).join('');
+        if (linksContainer) {
+            if (links.length === 0) {
+                linksContainer.innerHTML = '<div class="mdcp-preview-empty">링크가 없습니다.</div>';
+            } else {
+                linksContainer.innerHTML = links.map(link => (
+                    `<div class="mdcp-preview-link"><a href="${link}" target="_blank" rel="noopener noreferrer">${link}</a></div>`
+                )).join('');
+            }
+        }
+
+        if (videosContainer) {
+            const videoLinks = extractYouTubeWatchLinks(previewState.markdown);
+            if (videoLinks.length === 0) {
+                videosContainer.innerHTML = '<div class="mdcp-preview-empty">영상 링크가 없습니다.</div>';
+            } else {
+                videosContainer.innerHTML = videoLinks.map(link => (
+                    `<div class="mdcp-preview-link"><a href="${link}" target="_blank" rel="noopener noreferrer">${link}</a></div>`
+                )).join('');
+            }
         }
     }
 
@@ -880,11 +917,9 @@
                 showToast('✗ Markdown 변환에 실패했습니다.', floatingButton);
                 return false;
             }
+            showPreviewPanel(markdown);
             const copied = await copyToClipboard(markdown, null, floatingButton);
-            if (!copied) {
-                return false;
-            }
-            return true;
+            return copied;
         } catch (error) {
             console.error('Failed to copy full page Markdown:', error);
             showToast('✗ 전체 페이지 Markdown 복사에 실패했습니다.', floatingButton);
@@ -990,13 +1025,6 @@
      */
     function convertToMarkdown(element) {
         try {
-            if (isYouTubeSite()) {
-                const meta = extractYouTubeMetadata();
-                if (meta) {
-                    return meta;
-                }
-            }
-
             // Clone the element to avoid modifying the original
             const clonedElement = element.cloneNode(true);
 
