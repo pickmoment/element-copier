@@ -26,5 +26,11 @@
       "css": ["styles.css"],
       "run_at": "document_end"
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["yt-bridge.js"],
+      "matches": ["https://www.youtube.com/*"]
+    }
   ]
 }

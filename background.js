@@ -83,4 +83,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
+
+  if (message && message.type === 'mdcp-fetch-caption' && message.url) {
+    (async () => {
+      try {
+        const res = await fetch(message.url);
+        const text = await res.text();
+        sendResponse({
+          ok: res.ok,
+          status: res.status,
+          contentType: res.headers.get('content-type') || '',
+          text: text
+        });
+      } catch (error) {
+        sendResponse({ ok: false, status: 0, error: error.message });
+      }
+    })();
+    return true;
+  }
 });

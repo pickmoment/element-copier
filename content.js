@@ -27,6 +27,9 @@
     let previewPanel = null;
     let previewState = {
         markdown: '',
+        captions: '',
+        captionsMeta: null,
+        captionTracks: [],
         activeTab: 'render',
         height: 0,
         width: 0,
@@ -38,6 +41,13 @@
     let previewDragOffset = { x: 0, y: 0 };
     let isPreviewResizing = false;
     let previewResizeStart = { x: 0, y: 0, width: 0, height: 0 };
+
+    // YouTube player response from page context
+    let cachedPlayerResponse = null;
+    let cachedPlayerResponseSource = '';
+    let playerResponseReadyAt = 0;
+    let playerResponseScriptInjected = false;
+    let youTubeObserversInstalled = false;
 
     // Area selection mode
     let isAreaSelectionMode = false;
@@ -447,6 +457,441 @@
         return Array.from(new Set(watchLinks));
     }
 
+    function isYouTubeWatchPage() {
+        return window.location.hostname.includes('youtube.com') && window.location.pathname === '/watch';
+    }
+
+    function getYouTubePlayerResponse() {
+        if (cachedPlayerResponse) {
+            return cachedPlayerResponse;
+        }
+        if (window.ytInitialPlayerResponse) {
+            return window.ytInitialPlayerResponse;
+        }
+        const playerResponse = window.ytplayer?.config?.args?.player_response;
+        if (typeof playerResponse === 'string') {
+            try {
+                return JSON.parse(playerResponse);
+            } catch (error) {
+                console.warn('Failed to parse player_response JSON:', error);
+            }
+        }
+        return null;
+    }
+
+    function injectPlayerResponseProbe() {
+        if (playerResponseScriptInjected) return;
+        try {
+            const script = document.createElement('script');
+            script.src = chrome.runtime.getURL('yt-bridge.js');
+            script.onload = () => script.remove();
+            (document.documentElement || document.head || document.body).appendChild(script);
+            playerResponseScriptInjected = true;
+        } catch (error) {
+            console.warn('Failed to inject player response probe:', error);
+        }
+    }
+
+    function resetPlayerResponseCache() {
+        cachedPlayerResponse = null;
+        cachedPlayerResponseSource = '';
+        playerResponseReadyAt = 0;
+        playerResponseScriptInjected = false;
+    }
+
+    function setupYouTubeObservers() {
+        if (youTubeObserversInstalled) return;
+        youTubeObserversInstalled = true;
+
+        const handler = () => {
+            resetPlayerResponseCache();
+            injectPlayerResponseProbe();
+        };
+
+        window.addEventListener('yt-navigate-finish', handler);
+        window.addEventListener('yt-page-data-updated', handler);
+    }
+
+    function startPlayerResponsePolling() {
+        let attempts = 0;
+        const interval = setInterval(() => {
+            attempts += 1;
+            injectPlayerResponseProbe();
+            if (cachedPlayerResponse || attempts >= 10) {
+                clearInterval(interval);
+            }
+        }, 500);
+    }
+
+    function ensurePlayerResponse(timeoutMs = 1500) {
+        return new Promise(resolve => {
+            if (cachedPlayerResponse && Date.now() - playerResponseReadyAt < 60000) {
+                resolve(cachedPlayerResponse);
+                return;
+            }
+
+            const requestId = `mdcp_pr_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+            const listener = (event) => {
+                if (event.source !== window) return;
+                const data = event.data;
+                if (!data || data.type !== 'MDCP_GET_PLAYER_RESPONSE_RESULT') return;
+                if (data.requestId !== requestId) return;
+                window.removeEventListener('message', listener);
+                if (data.response) {
+                    cachedPlayerResponse = data.response;
+                    cachedPlayerResponseSource = data.source || '';
+                    playerResponseReadyAt = Date.now();
+                }
+                resolve(cachedPlayerResponse);
+            };
+
+            window.addEventListener('message', listener);
+            injectPlayerResponseProbe();
+            window.postMessage({ type: 'MDCP_GET_PLAYER_RESPONSE', requestId }, '*');
+
+            setTimeout(() => {
+                window.removeEventListener('message', listener);
+                resolve(cachedPlayerResponse);
+            }, timeoutMs);
+        });
+    }
+
+    window.addEventListener('message', (event) => {
+        if (event.source !== window) return;
+        if (!event.data || event.data.type !== 'MDCP_BRIDGE_READY') return;
+        console.log('MDCP bridge ready');
+    });
+
+    function fetchCaptionTextViaBackground(url, timeoutMs = 4000) {
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                reject(new Error('Caption fetch timeout'));
+            }, timeoutMs);
+
+            chrome.runtime.sendMessage({ type: 'mdcp-fetch-caption', url }, (response) => {
+                clearTimeout(timeoutId);
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
+                if (!response) {
+                    reject(new Error('No response from background'));
+                    return;
+                }
+                if (!response.ok) {
+                    reject(new Error(response.error || `Caption fetch failed: ${response.status}`));
+                    return;
+                }
+                resolve({
+                    text: response.text || '',
+                    status: response.status || 0,
+                    contentType: response.contentType || '',
+                    responseUrl: url
+                });
+            });
+        });
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function waitForElement(selector, timeoutMs = 3000) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            const el = document.querySelector(selector);
+            if (el) return el;
+            await sleep(100);
+        }
+        return null;
+    }
+
+    function collectTranscriptText() {
+        const segments = Array.from(document.querySelectorAll('ytd-transcript-segment-renderer'));
+        if (segments.length === 0) return '';
+        const lines = segments.map(seg => {
+            const textEl = seg.querySelector('.segment-text');
+            const text = textEl?.textContent?.replace(/\s+/g, ' ').trim() || '';
+            return text;
+        }).filter(Boolean);
+        return lines.join('\n');
+    }
+
+    async function tryScrapeTranscript() {
+        // If transcript is already open, just collect it.
+        const existing = collectTranscriptText();
+        if (existing) return existing;
+
+        // Recently YouTube added a direct "Show transcript" button below the description
+        const directTranscriptBtn = document.querySelector('button[aria-label="Show transcript"], button[aria-label="자막 표시"], ytd-video-description-transcript-section-renderer button');
+
+        if (directTranscriptBtn) {
+            directTranscriptBtn.click();
+        } else {
+            // Try to open via the "more actions" menu
+            const moreButton = document.querySelector('ytd-watch-metadata #button[aria-label]') ||
+                document.querySelector('ytd-video-primary-info-renderer #button[aria-label]') ||
+                document.querySelector('button[aria-label*="더보기"], button[aria-label*="More actions"]');
+
+            if (moreButton) {
+                moreButton.click();
+                await sleep(200);
+                const menuItem = Array.from(document.querySelectorAll('tp-yt-paper-item, ytd-menu-service-item-renderer'))
+                    .find(item => {
+                        const text = item.textContent || '';
+                        return text.includes('자막 표시') || text.includes('Show transcript');
+                    });
+                if (menuItem) {
+                    menuItem.click();
+                }
+            } else {
+                // Try expanding description to find the transcript button
+                const expandDescBtn = document.querySelector('#expand, #description-inline-expander');
+                if (expandDescBtn) {
+                    expandDescBtn.click();
+                    await sleep(300);
+                    const btn = document.querySelector('ytd-video-description-transcript-section-renderer button');
+                    if (btn) btn.click();
+                }
+            }
+        }
+
+        // Wait for transcript to render.
+        const rendered = await waitForElement('ytd-transcript-renderer, ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]');
+
+        if (rendered) {
+            // Further wait for actual text content to appear (network delay)
+            let retries = 10;
+            while (retries > 0) {
+                const text = collectTranscriptText();
+                if (text && text.trim().length > 0) {
+                    return text;
+                }
+                await sleep(500);
+                retries--;
+            }
+        }
+
+        return collectTranscriptText();
+    }
+
+    function getYouTubeCaptionTracks() {
+        const response = getYouTubePlayerResponse();
+        const tracks = response?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        return Array.isArray(tracks) ? tracks : [];
+    }
+
+    function getYouTubeCaptionDebugInfo() {
+        const response = getYouTubePlayerResponse();
+        const hasResponse = !!response;
+        const hasCaptions = !!response?.captions?.playerCaptionsTracklistRenderer;
+        const tracks = getYouTubeCaptionTracks();
+        const trackCount = tracks.length;
+        return { hasResponse, hasCaptions, trackCount, tracks, source: cachedPlayerResponseSource };
+    }
+
+    function pickYouTubeCaptionTrack(tracks) {
+        if (!tracks.length) return null;
+
+        const preferredLangs = (navigator.languages && navigator.languages.length > 0)
+            ? navigator.languages
+            : [navigator.language || ''];
+
+        const normalized = preferredLangs
+            .filter(Boolean)
+            .map(lang => lang.toLowerCase());
+
+        const scored = tracks.map(track => {
+            const langCode = (track.languageCode || '').toLowerCase();
+            const baseLang = langCode.split('-')[0];
+            let score = 0;
+
+            normalized.forEach(pref => {
+                if (langCode === pref) score += 20;
+                if (baseLang && pref.startsWith(baseLang)) score += 10;
+                if (pref.startsWith(baseLang)) score += 6;
+                if (langCode.startsWith(pref)) score += 6;
+            });
+
+            if (!track.kind) score += 2; // prefer non-ASR
+            if (track.kind === 'asr') score -= 1;
+
+            return { track, score };
+        });
+
+        scored.sort((a, b) => b.score - a.score);
+        return scored[0]?.track || tracks[0];
+    }
+
+    function parseYouTubeCaptionXml(xmlText) {
+        const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+        const nodes = Array.from(doc.getElementsByTagName('text'));
+        const lines = nodes
+            .map(node => node.textContent.replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+        return lines.join('\n');
+    }
+
+    function parseYouTubeCaptionVtt(vttText) {
+        const lines = vttText.split('\n');
+        const output = [];
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            if (trimmed === 'WEBVTT') continue;
+            if (trimmed.includes('-->')) continue;
+            if (/^\d+$/.test(trimmed)) continue;
+            output.push(trimmed);
+        }
+        return output.join('\n');
+    }
+
+    function parseYouTubeCaptionJson(jsonText) {
+        try {
+            const data = JSON.parse(jsonText);
+            const lines = [];
+            (data.events || []).forEach(event => {
+                const segs = event.segs || [];
+                const line = segs.map(seg => seg.utf8 || '').join('');
+                const cleaned = line.replace(/\s+/g, ' ').trim();
+                if (cleaned) lines.push(cleaned);
+            });
+            return lines.join('\n');
+        } catch (error) {
+            console.warn('Failed to parse caption JSON:', error);
+            return '';
+        }
+    }
+
+    async function waitForYouTubeCaptionTracks(retries = 6, delayMs = 500) {
+        for (let i = 0; i < retries; i++) {
+            const tracks = getYouTubeCaptionTracks();
+            if (tracks.length > 0) return tracks;
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+        return [];
+    }
+
+    async function fetchCaptionTextFromUrl(url) {
+        const response = await fetchCaptionTextViaBackground(url);
+        const responseUrl = response.responseUrl || url;
+        const status = response.status || 0;
+        const contentType = response.contentType || '';
+        const text = response.text || '';
+        if (!text) {
+            console.warn('Caption fetch empty body:', status, responseUrl, contentType);
+        } else if (contentType.includes('text/html')) {
+            const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim();
+            console.warn('Caption fetch returned HTML snippet:', snippet);
+        }
+        const trimmed = text.trim();
+        if (!trimmed) return '';
+
+        let parsed = '';
+        if (trimmed.startsWith('{')) {
+            parsed = parseYouTubeCaptionJson(trimmed);
+        } else if (trimmed.startsWith('WEBVTT')) {
+            parsed = parseYouTubeCaptionVtt(trimmed);
+        } else {
+            parsed = parseYouTubeCaptionXml(trimmed);
+        }
+
+        if (!parsed && trimmed) {
+            return trimmed;
+        }
+        return parsed;
+    }
+
+    async function fetchYouTubeCaptions() {
+        const tracks = await waitForYouTubeCaptionTracks();
+        const track = pickYouTubeCaptionTrack(tracks);
+
+        if (!track || !track.baseUrl) {
+            return null;
+        }
+
+        const baseUrl = track.baseUrl;
+        const candidateUrls = [];
+        if (baseUrl.includes('fmt=')) {
+            candidateUrls.push(baseUrl);
+        } else {
+            candidateUrls.push(`${baseUrl}&fmt=srv3`);
+            candidateUrls.push(`${baseUrl}&fmt=json3`);
+            candidateUrls.push(`${baseUrl}&fmt=vtt`);
+            candidateUrls.push(baseUrl);
+        }
+
+        let captionsText = '';
+        for (const url of candidateUrls) {
+            try {
+                const text = await fetchCaptionTextFromUrl(url);
+                if (text) {
+                    captionsText = text;
+                    break;
+                }
+            } catch (error) {
+                console.warn('Caption fetch failed for url:', url, error);
+            }
+        }
+
+        const meta = {
+            languageCode: track.languageCode || '',
+            languageName: track.name?.simpleText || '',
+            isAutoGenerated: track.kind === 'asr'
+        };
+
+        return { text: captionsText, meta };
+    }
+
+    async function fetchCaptionFromTrack(track) {
+        if (!track?.baseUrl) return null;
+        const baseUrl = track.baseUrl;
+        const candidateUrls = [];
+        if (baseUrl.includes('fmt=')) {
+            candidateUrls.push(baseUrl);
+        } else {
+            candidateUrls.push(`${baseUrl}&fmt=srv3`);
+            candidateUrls.push(`${baseUrl}&fmt=json3`);
+            candidateUrls.push(`${baseUrl}&fmt=vtt`);
+            candidateUrls.push(baseUrl);
+        }
+
+        let captionsText = '';
+        for (const url of candidateUrls) {
+            try {
+                console.log('Caption fetch url:', url);
+                const text = await fetchCaptionTextFromUrl(url);
+                console.log('Caption fetch result length:', text ? text.length : 0);
+                if (text) {
+                    captionsText = text;
+                    break;
+                }
+            } catch (error) {
+                console.warn('Caption fetch failed for url:', url, error);
+            }
+        }
+
+        if (!captionsText) {
+            console.log('Fetching captions via API failed, trying to scrape from UI...');
+            const transcriptText = await tryScrapeTranscript();
+            if (transcriptText) {
+                captionsText = transcriptText;
+                console.log('Successfully scraped transcript from the UI menu.');
+            } else {
+                console.warn('UI Scraping failed to find transcript text.');
+            }
+        }
+
+        const meta = {
+            languageCode: track.languageCode || '',
+            languageName: track.name?.simpleText || '',
+            isAutoGenerated: track.kind === 'asr'
+        };
+
+        return { text: captionsText, meta };
+    }
+
     /**
      * Create or update preview panel
      */
@@ -469,6 +914,7 @@
                     <button class="mdcp-preview-tab" data-tab="edit">수정</button>
                     <button class="mdcp-preview-tab" data-tab="links">링크</button>
                     <button class="mdcp-preview-tab" data-tab="videos">영상링크</button>
+                    <button class="mdcp-preview-tab mdcp-preview-tab-captions" data-tab="captions">자막</button>
                 </div>
                 <div class="mdcp-preview-body">
                     <div class="mdcp-preview-pane" data-pane="render"></div>
@@ -480,6 +926,9 @@
                     </div>
                     <div class="mdcp-preview-pane mdcp-preview-pane-hidden" data-pane="videos">
                         <div class="mdcp-preview-links mdcp-preview-videos"></div>
+                    </div>
+                    <div class="mdcp-preview-pane mdcp-preview-pane-hidden" data-pane="captions">
+                        <div class="mdcp-preview-captions"></div>
                     </div>
                 </div>
                 <div class="mdcp-preview-resize-handle tl" data-resize="tl" title="크기 변경"></div>
@@ -603,6 +1052,15 @@
                     return;
                 }
 
+                if (previewState.activeTab === 'captions') {
+                    if (previewState.captions) {
+                        await copyToClipboard(previewState.captions, '✓ 자막이 클립보드에 복사되었습니다!', event);
+                    } else {
+                        showToast('자막을 선택하세요.', event);
+                    }
+                    return;
+                }
+
                 await copyToClipboard(previewState.markdown, null, event);
             });
 
@@ -619,6 +1077,33 @@
                 previewState.markdown = textarea.value;
                 updatePreviewContent();
             });
+
+            const captionsContainer = previewPanel.querySelector('[data-pane="captions"] .mdcp-preview-captions');
+            if (captionsContainer) {
+                captionsContainer.addEventListener('click', async (event) => {
+                    const button = event.target.closest('button[data-caption-index]');
+                    if (!button) return;
+                    const index = Number(button.getAttribute('data-caption-index'));
+                    const track = previewState.captionTracks[index];
+                    if (!track) return;
+
+                    try {
+                        showToast('자막 불러오는 중...', button);
+                        const result = await fetchCaptionFromTrack(track);
+                        if (!result || !result.text) {
+                            showToast('자막을 찾지 못했습니다.', button);
+                            return;
+                        }
+                        previewState.captions = result.text;
+                        previewState.captionsMeta = result.meta;
+                        await copyToClipboard(result.text, '✓ 자막이 클립보드에 복사되었습니다!', button);
+                        updatePreviewContent();
+                    } catch (error) {
+                        console.error('Failed to fetch captions:', error);
+                        showToast('✗ 자막을 가져오지 못했습니다.', button);
+                    }
+                });
+            }
         }
 
         const titleEl = previewPanel.querySelector('.mdcp-preview-title');
@@ -652,6 +1137,9 @@
     }
 
     function setPreviewTab(tabName) {
+        if (tabName === 'captions' && !previewState.captions && !isYouTubeWatchPage()) {
+            tabName = 'render';
+        }
         previewState.activeTab = tabName;
         const tabs = previewPanel.querySelectorAll('.mdcp-preview-tab');
         const panes = previewPanel.querySelectorAll('.mdcp-preview-pane');
@@ -672,6 +1160,8 @@
         const textarea = previewPanel.querySelector('.mdcp-preview-textarea');
         const linksContainer = previewPanel.querySelector('[data-pane="links"] .mdcp-preview-links');
         const videosContainer = previewPanel.querySelector('[data-pane="videos"] .mdcp-preview-videos');
+        const captionsContainer = previewPanel.querySelector('[data-pane="captions"] .mdcp-preview-captions');
+        const captionsTab = previewPanel.querySelector('.mdcp-preview-tab-captions');
 
         if (textarea.value !== previewState.markdown) {
             textarea.value = previewState.markdown;
@@ -697,6 +1187,37 @@
                 videosContainer.innerHTML = videoLinks.map(link => (
                     `<div class="mdcp-preview-link"><a href="${link}" target="_blank" rel="noopener noreferrer">${link}</a></div>`
                 )).join('');
+            }
+        }
+
+        if (captionsTab) {
+            const shouldShowCaptions = isYouTubeWatchPage() || !!previewState.captions || (previewState.captionTracks && previewState.captionTracks.length > 0);
+            captionsTab.classList.toggle('mdcp-hidden', !shouldShowCaptions);
+        }
+
+        if (captionsContainer) {
+            if (!isYouTubeWatchPage()) {
+                captionsContainer.innerHTML = '<div class="mdcp-preview-empty">유튜브 영상 페이지에서만 자막을 표시합니다.</div>';
+            } else if (previewState.captionTracks && previewState.captionTracks.length > 0 && !previewState.captions) {
+                const items = previewState.captionTracks.map((track, index) => {
+                    const label = track.name?.simpleText || track.languageCode || `자막 ${index + 1}`;
+                    const hasAutoLabel = /자동\s*생성/.test(label);
+                    const badge = track.kind === 'asr' && !hasAutoLabel ? ' (자동 생성)' : '';
+                    return `<button class="mdcp-caption-item" data-caption-index="${index}">${escapeHtml(label)}${badge}</button>`;
+                }).join('');
+                captionsContainer.innerHTML = `
+                    <div class="mdcp-preview-caption-help">복사할 자막을 선택하세요.</div>
+                    <div class="mdcp-preview-caption-list">${items}</div>
+                `;
+            } else if (!previewState.captions) {
+                captionsContainer.innerHTML = '<div class="mdcp-preview-empty">자막이 없습니다.</div>';
+            } else {
+                const meta = previewState.captionsMeta;
+                const metaLine = meta
+                    ? `<div class="mdcp-preview-caption-meta">${meta.languageName || meta.languageCode || '자막'}${meta.isAutoGenerated ? ' (자동 생성)' : ''}</div>`
+                    : '';
+                const escaped = escapeHtml(previewState.captions);
+                captionsContainer.innerHTML = `${metaLine}<pre class="mdcp-preview-caption-text">${escaped}</pre>`;
             }
         }
     }
@@ -932,13 +1453,6 @@
      */
     async function copyImageToClipboard(element) {
         return copyMultipleElementsAsImage([element]);
-    }
-
-    /**
-     * Check if current site is YouTube
-     */
-    function isYouTubeSite() {
-        return window.location.hostname.includes('youtube.com');
     }
 
     /**
@@ -1441,6 +1955,67 @@
         }
     }
 
+    function getFloatingButtonTitle() {
+        const lines = [
+            '요소 복사 모드 시작',
+            'Shift+클릭: 전체 페이지 Markdown',
+            '우클릭: 요소 이미지 복사',
+            'Shift+우클릭: 전체 페이지 이미지'
+        ];
+
+        if (isYouTubeWatchPage()) {
+            lines.splice(1, 0, 'Alt+클릭: 유튜브 자막 선택');
+        }
+
+        return lines.join('\n');
+    }
+
+    async function copyYouTubeCaptions() {
+        if (!isYouTubeWatchPage()) {
+            showToast('유튜브 영상 페이지에서만 자막 복사가 가능합니다.', floatingButton);
+            return;
+        }
+
+        try {
+            await ensurePlayerResponse();
+            const debug = getYouTubeCaptionDebugInfo();
+            console.log('Caption debug:', {
+                playerResponse: debug.hasResponse,
+                captions: debug.hasCaptions,
+                trackCount: debug.trackCount,
+                source: debug.source || '(none)'
+            });
+            if (debug.tracks.length > 0) {
+                console.log('Caption tracks:', debug.tracks.map(track => ({
+                    languageCode: track.languageCode,
+                    name: track.name?.simpleText,
+                    kind: track.kind
+                })));
+            }
+
+            showToast('자막 목록 불러오는 중...', floatingButton);
+            const tracks = await waitForYouTubeCaptionTracks();
+            if (!tracks || tracks.length === 0) {
+                showToast('자막을 찾지 못했습니다.', floatingButton);
+                return;
+            }
+
+            previewState.captionTracks = tracks;
+            previewState.captions = '';
+            previewState.captionsMeta = null;
+
+            if (!previewPanel) {
+                showPreviewPanel(previewState.markdown || '');
+            }
+
+            updatePreviewContent();
+            setPreviewTab('captions');
+        } catch (error) {
+            console.error('Failed to copy YouTube captions:', error);
+            showToast('✗ 자막 목록을 가져오지 못했습니다.', floatingButton);
+        }
+    }
+
     /**
      * Create floating button
      */
@@ -1448,7 +2023,7 @@
         floatingButton = document.createElement('div');
         floatingButton.className = 'mdcp-floating-button';
         floatingButton.innerHTML = '📋';
-        floatingButton.title = '요소 복사 모드 시작\nShift+클릭: 전체 페이지 Markdown\n우클릭: 요소 이미지 복사\nShift+우클릭: 전체 페이지 이미지';
+        floatingButton.title = getFloatingButtonTitle();
         document.body.appendChild(floatingButton);
 
         // Restore last position from chrome.storage when available
@@ -1497,6 +2072,11 @@
 
         event.stopPropagation();
         event.preventDefault();
+
+        if (event.altKey && isYouTubeWatchPage()) {
+            copyYouTubeCaptions();
+            return;
+        }
 
         if (event.shiftKey) {
             copyFullPageAsMarkdown();
@@ -1682,7 +2262,7 @@
         if (floatingButton) {
             floatingButton.classList.remove('mdcp-active');
             floatingButton.innerHTML = '📋';
-            floatingButton.title = '요소 복사 모드 시작\nShift+클릭: 전체 페이지 Markdown\n우클릭: 요소 이미지 복사\nShift+우클릭: 전체 페이지 이미지';
+            floatingButton.title = getFloatingButtonTitle();
             floatingButton.style.opacity = '';
             floatingButton.style.display = '';
         }
@@ -1700,6 +2280,12 @@
 
     // Initialize floating button when script is injected
     createFloatingButton();
+
+    if (isYouTubeWatchPage()) {
+        setupYouTubeObservers();
+        injectPlayerResponseProbe();
+        startPlayerResponsePolling();
+    }
 
     console.log('Element to Markdown Copier initialized');
 })();
