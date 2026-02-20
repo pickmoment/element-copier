@@ -563,36 +563,6 @@
         console.log('MDCP bridge ready');
     });
 
-    function fetchCaptionTextViaBackground(url, timeoutMs = 4000) {
-        return new Promise((resolve, reject) => {
-            const timeoutId = setTimeout(() => {
-                reject(new Error('Caption fetch timeout'));
-            }, timeoutMs);
-
-            chrome.runtime.sendMessage({ type: 'mdcp-fetch-caption', url }, (response) => {
-                clearTimeout(timeoutId);
-                if (chrome.runtime.lastError) {
-                    reject(new Error(chrome.runtime.lastError.message));
-                    return;
-                }
-                if (!response) {
-                    reject(new Error('No response from background'));
-                    return;
-                }
-                if (!response.ok) {
-                    reject(new Error(response.error || `Caption fetch failed: ${response.status}`));
-                    return;
-                }
-                resolve({
-                    text: response.text || '',
-                    status: response.status || 0,
-                    contentType: response.contentType || '',
-                    responseUrl: url
-                });
-            });
-        });
-    }
-
     function sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
@@ -724,46 +694,6 @@
         return scored[0]?.track || tracks[0];
     }
 
-    function parseYouTubeCaptionXml(xmlText) {
-        const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
-        const nodes = Array.from(doc.getElementsByTagName('text'));
-        const lines = nodes
-            .map(node => node.textContent.replace(/\s+/g, ' ').trim())
-            .filter(Boolean);
-        return lines.join('\n');
-    }
-
-    function parseYouTubeCaptionVtt(vttText) {
-        const lines = vttText.split('\n');
-        const output = [];
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-            if (trimmed === 'WEBVTT') continue;
-            if (trimmed.includes('-->')) continue;
-            if (/^\d+$/.test(trimmed)) continue;
-            output.push(trimmed);
-        }
-        return output.join('\n');
-    }
-
-    function parseYouTubeCaptionJson(jsonText) {
-        try {
-            const data = JSON.parse(jsonText);
-            const lines = [];
-            (data.events || []).forEach(event => {
-                const segs = event.segs || [];
-                const line = segs.map(seg => seg.utf8 || '').join('');
-                const cleaned = line.replace(/\s+/g, ' ').trim();
-                if (cleaned) lines.push(cleaned);
-            });
-            return lines.join('\n');
-        } catch (error) {
-            console.warn('Failed to parse caption JSON:', error);
-            return '';
-        }
-    }
-
     async function waitForYouTubeCaptionTracks(retries = 6, delayMs = 500) {
         for (let i = 0; i < retries; i++) {
             const tracks = getYouTubeCaptionTracks();
@@ -773,120 +703,21 @@
         return [];
     }
 
-    async function fetchCaptionTextFromUrl(url) {
-        const response = await fetchCaptionTextViaBackground(url);
-        const responseUrl = response.responseUrl || url;
-        const status = response.status || 0;
-        const contentType = response.contentType || '';
-        const text = response.text || '';
-        if (!text) {
-            console.warn('Caption fetch empty body:', status, responseUrl, contentType);
-        } else if (contentType.includes('text/html')) {
-            const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim();
-            console.warn('Caption fetch returned HTML snippet:', snippet);
-        }
-        const trimmed = text.trim();
-        if (!trimmed) return '';
-
-        let parsed = '';
-        if (trimmed.startsWith('{')) {
-            parsed = parseYouTubeCaptionJson(trimmed);
-        } else if (trimmed.startsWith('WEBVTT')) {
-            parsed = parseYouTubeCaptionVtt(trimmed);
-        } else {
-            parsed = parseYouTubeCaptionXml(trimmed);
-        }
-
-        if (!parsed && trimmed) {
-            return trimmed;
-        }
-        return parsed;
-    }
-
-    async function fetchYouTubeCaptions() {
-        const tracks = await waitForYouTubeCaptionTracks();
-        const track = pickYouTubeCaptionTrack(tracks);
-
-        if (!track || !track.baseUrl) {
-            return null;
-        }
-
-        const baseUrl = track.baseUrl;
-        const candidateUrls = [];
-        if (baseUrl.includes('fmt=')) {
-            candidateUrls.push(baseUrl);
-        } else {
-            candidateUrls.push(`${baseUrl}&fmt=srv3`);
-            candidateUrls.push(`${baseUrl}&fmt=json3`);
-            candidateUrls.push(`${baseUrl}&fmt=vtt`);
-            candidateUrls.push(baseUrl);
-        }
-
-        let captionsText = '';
-        for (const url of candidateUrls) {
-            try {
-                const text = await fetchCaptionTextFromUrl(url);
-                if (text) {
-                    captionsText = text;
-                    break;
-                }
-            } catch (error) {
-                console.warn('Caption fetch failed for url:', url, error);
-            }
-        }
-
-        const meta = {
-            languageCode: track.languageCode || '',
-            languageName: track.name?.simpleText || '',
-            isAutoGenerated: track.kind === 'asr'
-        };
-
-        return { text: captionsText, meta };
-    }
-
     async function fetchCaptionFromTrack(track) {
-        if (!track?.baseUrl) return null;
-        const baseUrl = track.baseUrl;
-        const candidateUrls = [];
-        if (baseUrl.includes('fmt=')) {
-            candidateUrls.push(baseUrl);
-        } else {
-            candidateUrls.push(`${baseUrl}&fmt=srv3`);
-            candidateUrls.push(`${baseUrl}&fmt=json3`);
-            candidateUrls.push(`${baseUrl}&fmt=vtt`);
-            candidateUrls.push(baseUrl);
-        }
-
         let captionsText = '';
-        for (const url of candidateUrls) {
-            try {
-                console.log('Caption fetch url:', url);
-                const text = await fetchCaptionTextFromUrl(url);
-                console.log('Caption fetch result length:', text ? text.length : 0);
-                if (text) {
-                    captionsText = text;
-                    break;
-                }
-            } catch (error) {
-                console.warn('Caption fetch failed for url:', url, error);
-            }
-        }
-
-        if (!captionsText) {
-            console.log('Fetching captions via API failed, trying to scrape from UI...');
-            const transcriptText = await tryScrapeTranscript();
-            if (transcriptText) {
-                captionsText = transcriptText;
-                console.log('Successfully scraped transcript from the UI menu.');
-            } else {
-                console.warn('UI Scraping failed to find transcript text.');
-            }
+        console.log('Fetching captions via UI scraping...');
+        const transcriptText = await tryScrapeTranscript();
+        if (transcriptText) {
+            captionsText = transcriptText;
+            console.log('Successfully scraped transcript from the UI menu.');
+        } else {
+            console.warn('UI Scraping failed to find transcript text.');
         }
 
         const meta = {
-            languageCode: track.languageCode || '',
-            languageName: track.name?.simpleText || '',
-            isAutoGenerated: track.kind === 'asr'
+            languageCode: track?.languageCode || '',
+            languageName: track?.name?.simpleText || '',
+            isAutoGenerated: track?.kind === 'asr'
         };
 
         return { text: captionsText, meta };
